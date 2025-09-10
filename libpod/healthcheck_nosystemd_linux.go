@@ -28,9 +28,12 @@ var activeTimers = make(map[string]*healthcheckTimer)
 // ReattachHealthCheckTimers reattaches healthcheck timers for running containers after podman restart
 // This implementation is for nosystemd builds where healthchecks are managed by goroutines
 func ReattachHealthCheckTimers(containers []*Container) {
+	logrus.Infof("HEALTHCHECK: ReattachHealthCheckTimers called with %d containers", len(containers))
 	for _, ctr := range containers {
+		logrus.Debugf("HEALTHCHECK: Checking container %s, state: %v, has healthcheck: %v", ctr.ID(), ctr.state.State, ctr.config.HealthCheckConfig != nil)
 		// Only reattach for running containers with healthcheck configs
 		if ctr.state.State != define.ContainerStateRunning {
+			logrus.Debugf("HEALTHCHECK: Skipping container %s - not running (state: %v)", ctr.ID(), ctr.state.State)
 			continue
 		}
 
@@ -48,18 +51,20 @@ func ReattachHealthCheckTimers(containers []*Container) {
 		if ctr.config.StartupHealthCheckConfig != nil && !ctr.state.StartupHCPassed {
 			// Reattach startup healthcheck
 			interval := ctr.config.StartupHealthCheckConfig.StartInterval.String()
+			logrus.Infof("HEALTHCHECK: Reattaching startup healthcheck timer for container %s with interval %s", ctr.ID(), interval)
 			if err := ctr.createTimer(interval, true); err != nil {
-				logrus.Errorf("Failed to reattach startup healthcheck timer for container %s: %v", ctr.ID(), err)
+				logrus.Errorf("HEALTHCHECK: Failed to reattach startup healthcheck timer for container %s: %v", ctr.ID(), err)
 			} else {
-				logrus.Debugf("Reattached startup healthcheck timer for container %s", ctr.ID())
+				logrus.Infof("HEALTHCHECK: Successfully reattached startup healthcheck timer for container %s", ctr.ID())
 			}
 		} else if ctr.state.StartupHCPassed || ctr.config.StartupHealthCheckConfig == nil {
 			// Reattach regular healthcheck
 			interval := ctr.config.HealthCheckConfig.Interval.String()
+			logrus.Infof("HEALTHCHECK: Reattaching regular healthcheck timer for container %s with interval %s", ctr.ID(), interval)
 			if err := ctr.createTimer(interval, false); err != nil {
-				logrus.Errorf("Failed to reattach healthcheck timer for container %s: %v", ctr.ID(), err)
+				logrus.Errorf("HEALTHCHECK: Failed to reattach healthcheck timer for container %s: %v", ctr.ID(), err)
 			} else {
-				logrus.Debugf("Reattached healthcheck timer for container %s", ctr.ID())
+				logrus.Infof("HEALTHCHECK: Successfully reattached healthcheck timer for container %s", ctr.ID())
 			}
 		}
 	}
