@@ -23,6 +23,46 @@ type healthcheckTimer struct {
 // Global map to track active timers (in a real implementation, this would be part of the runtime)
 var activeTimers = make(map[string]*healthcheckTimer)
 
+// ReattachHealthCheckTimers reattaches healthcheck timers for running containers after podman restart
+// This implementation is for nosystemd builds where healthchecks are managed by goroutines
+func ReattachHealthCheckTimers(containers []*Container) {
+	for _, ctr := range containers {
+		// Only reattach for running containers with healthcheck configs
+		if ctr.state.State != define.ContainerStateRunning {
+			continue
+		}
+
+		// Check if container has healthcheck config
+		if ctr.config.HealthCheckConfig == nil {
+			continue
+		}
+
+		// Check if timer is already running
+		if _, exists := activeTimers[ctr.ID()]; exists {
+			continue
+		}
+
+		// Check if this is a startup healthcheck that hasn't passed yet
+		if ctr.config.StartupHealthCheckConfig != nil && !ctr.state.StartupHCPassed {
+			// Reattach startup healthcheck
+			interval := ctr.config.StartupHealthCheckConfig.StartInterval.String()
+			if err := ctr.createTimer(interval, true); err != nil {
+				logrus.Errorf("Failed to reattach startup healthcheck timer for container %s: %v", ctr.ID(), err)
+			} else {
+				logrus.Debugf("Reattached startup healthcheck timer for container %s", ctr.ID())
+			}
+		} else if ctr.state.StartupHCPassed || ctr.config.StartupHealthCheckConfig == nil {
+			// Reattach regular healthcheck
+			interval := ctr.config.HealthCheckConfig.Interval.String()
+			if err := ctr.createTimer(interval, false); err != nil {
+				logrus.Errorf("Failed to reattach healthcheck timer for container %s: %v", ctr.ID(), err)
+			} else {
+				logrus.Debugf("Reattached healthcheck timer for container %s", ctr.ID())
+			}
+		}
+	}
+}
+
 // disableHealthCheckSystemd returns true if healthcheck should be disabled
 // For non-systemd builds, we only disable if interval is 0
 func (c *Container) disableHealthCheckSystemd(isStartup bool) bool {

@@ -874,6 +874,12 @@ func (r *Runtime) refresh(ctx context.Context, alivePath string) error {
 			}
 		}
 	}
+
+	// Reattach healthcheck timers for running containers after podman restart
+	// This is only needed for the nosystemd build where healthchecks are managed by goroutines
+	// Systemd healthchecks are managed by systemd and don't need reattachment
+	ReattachHealthCheckTimers(ctrs)
+
 	for _, pod := range pods {
 		if err := pod.refresh(); err != nil {
 			logrus.Errorf("Refreshing pod %s: %v", pod.ID(), err)
