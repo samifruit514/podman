@@ -131,7 +131,22 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 
 // startTimer starts the goroutine-based timer for healthchecks
 func (c *Container) startTimer(isStartup bool) error {
-	// Timer is already started in createTimer, nothing to do
+	// Check if timer already exists
+	if _, exists := activeTimers[c.ID()]; exists {
+		logrus.Debugf("Healthcheck timer already exists for container %s", c.ID())
+		return nil
+	}
+
+	// Create timer if it doesn't exist
+	if c.config.HealthCheckConfig != nil {
+		interval := c.config.HealthCheckConfig.Interval.String()
+		if c.config.StartupHealthCheckConfig != nil && !c.state.StartupHCPassed {
+			interval = c.config.StartupHealthCheckConfig.StartInterval.String()
+		}
+		logrus.Debugf("Creating healthcheck timer for container %s during start", c.ID())
+		return c.createTimer(interval, c.config.StartupHealthCheckConfig != nil)
+	}
+
 	return nil
 }
 
