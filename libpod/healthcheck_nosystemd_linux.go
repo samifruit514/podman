@@ -5,6 +5,8 @@ package libpod
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/containers/podman/v5/libpod/define"
@@ -109,6 +111,9 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 	// Store timer reference globally and in container state
 	activeTimers[c.ID()] = timer
 	c.state.HCUnitName = "goroutine-timer"
+	// Create a stop file for cross-process cleanup
+	stopFile := filepath.Join(c.runtime.config.Engine.TmpDir, fmt.Sprintf("healthcheck-stop-%s", c.ID()))
+	c.state.HealthCheckStopFile = stopFile
 
 	if err := c.save(); err != nil {
 		cancel()
@@ -136,30 +141,41 @@ func (c *Container) removeTransientFiles(ctx context.Context, isStartup bool, un
 
 // stopHealthCheckTimer stops the background healthcheck goroutine
 func (c *Container) stopHealthCheckTimer() error {
+	// First try to stop using the in-memory map (same process)
 	timer, exists := activeTimers[c.ID()]
-	if !exists {
+	if exists {
+		logrus.Debugf("Stopping healthcheck timer for container %s (same process)", c.ID())
+
+		// Cancel the context to stop the goroutine
+		timer.cancel()
+
+		// Wait for the goroutine to finish (with timeout)
+		select {
+		case <-timer.done:
+			logrus.Debugf("Healthcheck timer for container %s stopped gracefully", c.ID())
+		case <-time.After(5 * time.Second):
+			logrus.Warnf("Healthcheck timer for container %s did not stop within timeout", c.ID())
+		}
+
+		// Remove from active timers
+		delete(activeTimers, c.ID())
+	} else if c.state.HealthCheckStopFile != "" {
+		// Called from different process (cleanup), create stop file
+		logrus.Debugf("Stopping healthcheck timer for container %s (different process, creating stop file)", c.ID())
+
+		// Create the stop file to signal the healthcheck goroutine to exit
+		if err := os.WriteFile(c.state.HealthCheckStopFile, []byte("stop"), 0644); err != nil {
+			logrus.Warnf("Failed to create healthcheck stop file for container %s: %v", c.ID(), err)
+		} else {
+			logrus.Debugf("Created healthcheck stop file for container %s", c.ID())
+		}
+	} else {
 		logrus.Debugf("No active healthcheck timer found for container %s", c.ID())
-		return nil
 	}
 
-	logrus.Debugf("Stopping healthcheck timer for container %s", c.ID())
-
-	// Cancel the context to stop the goroutine
-	timer.cancel()
-
-	// Wait for the goroutine to finish (with timeout)
-	select {
-	case <-timer.done:
-		logrus.Debugf("Healthcheck timer for container %s stopped gracefully", c.ID())
-	case <-time.After(5 * time.Second):
-		logrus.Warnf("Healthcheck timer for container %s did not stop within timeout", c.ID())
-	}
-
-	// Remove from active timers
-	delete(activeTimers, c.ID())
-
-	// Clear the unit name
+	// Clear the unit name and stop file
 	c.state.HCUnitName = ""
+	c.state.HealthCheckStopFile = ""
 	return c.save()
 }
 
@@ -178,6 +194,16 @@ func (t *healthcheckTimer) run() {
 			logrus.Debugf("Healthcheck timer for container %s stopped", t.container.ID())
 			return
 		case <-ticker.C:
+			// Check for stop file (cross-process cleanup)
+			if t.container.state.HealthCheckStopFile != "" {
+				if _, err := os.Stat(t.container.state.HealthCheckStopFile); err == nil {
+					logrus.Debugf("Healthcheck timer for container %s stopped by stop file", t.container.ID())
+					// Clean up the stop file
+					os.Remove(t.container.state.HealthCheckStopFile)
+					return
+				}
+			}
+
 			// Run the healthcheck
 			if err := t.runHealthCheck(); err != nil {
 				logrus.Errorf("Healthcheck failed for container %s: %v", t.container.ID(), err)
