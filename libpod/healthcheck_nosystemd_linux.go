@@ -114,6 +114,7 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 	// Create a stop file for cross-process cleanup
 	stopFile := filepath.Join(c.runtime.config.Engine.TmpDir, fmt.Sprintf("healthcheck-stop-%s", c.ID()))
 	c.state.HealthCheckStopFile = stopFile
+	logrus.Debugf("Created healthcheck stop file path for container %s: %s", c.ID(), stopFile)
 
 	if err := c.save(); err != nil {
 		cancel()
@@ -124,7 +125,7 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 	// Start the background goroutine
 	go timer.run()
 
-	logrus.Debugf("Created goroutine-based healthcheck timer for container %s with interval %s", c.ID(), interval)
+	logrus.Infof("HEALTHCHECK: Created goroutine-based healthcheck timer for container %s with interval %s, stop file: %s", c.ID(), interval, stopFile)
 	return nil
 }
 
@@ -164,10 +165,11 @@ func (c *Container) stopHealthCheckTimer() error {
 		logrus.Debugf("Stopping healthcheck timer for container %s (different process, creating stop file)", c.ID())
 
 		// Create the stop file to signal the healthcheck goroutine to exit
+		logrus.Infof("HEALTHCHECK: Creating stop file for container %s at: %s", c.ID(), c.state.HealthCheckStopFile)
 		if err := os.WriteFile(c.state.HealthCheckStopFile, []byte("stop"), 0644); err != nil {
-			logrus.Warnf("Failed to create healthcheck stop file for container %s: %v", c.ID(), err)
+			logrus.Errorf("HEALTHCHECK: Failed to create healthcheck stop file for container %s: %v", c.ID(), err)
 		} else {
-			logrus.Debugf("Created healthcheck stop file for container %s", c.ID())
+			logrus.Infof("HEALTHCHECK: Successfully created healthcheck stop file for container %s", c.ID())
 		}
 	} else {
 		logrus.Debugf("No active healthcheck timer found for container %s", c.ID())
@@ -186,7 +188,7 @@ func (t *healthcheckTimer) run() {
 	ticker := time.NewTicker(t.interval)
 	defer ticker.Stop()
 
-	logrus.Debugf("Starting healthcheck timer for container %s with interval %s", t.container.ID(), t.interval)
+	logrus.Infof("HEALTHCHECK: Starting healthcheck timer for container %s with interval %s, stop file: %s", t.container.ID(), t.interval, t.container.state.HealthCheckStopFile)
 
 	for {
 		select {
@@ -196,11 +198,18 @@ func (t *healthcheckTimer) run() {
 		case <-ticker.C:
 			// Check for stop file (cross-process cleanup)
 			if t.container.state.HealthCheckStopFile != "" {
+				logrus.Debugf("HEALTHCHECK: Checking for stop file for container %s: %s", t.container.ID(), t.container.state.HealthCheckStopFile)
 				if _, err := os.Stat(t.container.state.HealthCheckStopFile); err == nil {
-					logrus.Debugf("Healthcheck timer for container %s stopped by stop file", t.container.ID())
+					logrus.Infof("HEALTHCHECK: Stop file found for container %s, stopping timer gracefully", t.container.ID())
 					// Clean up the stop file
-					os.Remove(t.container.state.HealthCheckStopFile)
+					if err := os.Remove(t.container.state.HealthCheckStopFile); err != nil {
+						logrus.Warnf("HEALTHCHECK: Failed to remove stop file for container %s: %v", t.container.ID(), err)
+					} else {
+						logrus.Debugf("HEALTHCHECK: Successfully removed stop file for container %s", t.container.ID())
+					}
 					return
+				} else {
+					logrus.Debugf("HEALTHCHECK: No stop file found for container %s (err: %v)", t.container.ID(), err)
 				}
 			}
 
