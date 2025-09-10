@@ -96,9 +96,19 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 		return err
 	}
 
-	// Stop any existing timer
+	// Stop any existing timer only if there's actually an active timer in memory
 	if c.state.HCUnitName != "" {
-		c.stopHealthCheckTimer()
+		// Check if there's an active timer in memory before stopping
+		if _, exists := activeTimers[c.ID()]; exists {
+			c.stopHealthCheckTimer()
+		} else {
+			// No active timer in memory, just clear the state without creating stop file
+			c.state.HCUnitName = ""
+			c.state.HealthCheckStopFile = ""
+			if err := c.save(); err != nil {
+				return fmt.Errorf("clearing container %s healthcheck state: %w", c.ID(), err)
+			}
+		}
 	}
 
 	// Create context for cancellation
