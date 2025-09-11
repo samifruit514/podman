@@ -336,6 +336,7 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 
 	// Add healthcheck configuration as JSON annotation (for conmon)
 	if s.ContainerHealthCheckConfig.HealthConfig != nil {
+		logrus.Debugf("HEALTHCHECK: Adding regular healthcheck annotation to OCI spec")
 		// Convert durations to seconds for easier parsing in conmon
 		healthCheckForConmon := struct {
 			Test        []string `json:"test"`
@@ -353,10 +354,14 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 		healthCheckJSON, err := json.Marshal(healthCheckForConmon)
 		if err == nil {
 			configSpec.Annotations["io.podman.healthcheck"] = string(healthCheckJSON)
+			logrus.Debugf("HEALTHCHECK: Added healthcheck annotation: %s", string(healthCheckJSON))
+		} else {
+			logrus.Errorf("HEALTHCHECK: Failed to marshal healthcheck config: %v", err)
 		}
 	}
 
 	if s.ContainerHealthCheckConfig.StartupHealthConfig != nil {
+		logrus.Debugf("HEALTHCHECK: Adding startup healthcheck annotation to OCI spec")
 		// Convert durations to seconds for easier parsing in conmon
 		startupHealthCheckForConmon := struct {
 			Test        []string `json:"test"`
@@ -374,6 +379,9 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 		startupHealthCheckJSON, err := json.Marshal(startupHealthCheckForConmon)
 		if err == nil {
 			configSpec.Annotations["io.podman.startup-healthcheck"] = string(startupHealthCheckJSON)
+			logrus.Debugf("HEALTHCHECK: Added startup healthcheck annotation: %s", string(startupHealthCheckJSON))
+		} else {
+			logrus.Errorf("HEALTHCHECK: Failed to marshal startup healthcheck config: %v", err)
 		}
 	}
 
