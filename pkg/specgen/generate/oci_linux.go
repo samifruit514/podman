@@ -334,6 +334,21 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 		configSpec.Annotations[define.InspectAnnotationInit] = define.InspectResponseTrue
 	}
 
+	// Add healthcheck configuration as annotation (for conmon)
+	if s.ContainerHealthCheckConfig.HealthConfig != nil {
+		healthCheckJSON, err := json.Marshal(s.ContainerHealthCheckConfig.HealthConfig)
+		if err == nil {
+			configSpec.Annotations["io.podman.healthcheck"] = string(healthCheckJSON)
+		}
+	}
+
+	if s.ContainerHealthCheckConfig.StartupHealthConfig != nil {
+		startupHealthCheckJSON, err := json.Marshal(s.ContainerHealthCheckConfig.StartupHealthConfig)
+		if err == nil {
+			configSpec.Annotations["io.podman.startup-healthcheck"] = string(startupHealthCheckJSON)
+		}
+	}
+
 	if s.OOMScoreAdj != nil {
 		g.SetProcessOOMScoreAdj(*s.OOMScoreAdj)
 	}
