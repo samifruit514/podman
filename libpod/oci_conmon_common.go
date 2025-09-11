@@ -1039,6 +1039,9 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 		args = append(args, "--conmon-pidfile", ctr.config.ConmonPidFile)
 	}
 
+	// Add healthcheck-related arguments (build-conditional)
+	args = r.addHealthCheckArgs(ctr, args)
+
 	if r.noPivot {
 		args = append(args, "--no-pivot")
 	}
