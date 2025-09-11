@@ -334,7 +334,7 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 		configSpec.Annotations[define.InspectAnnotationInit] = define.InspectResponseTrue
 	}
 
-	// Add healthcheck configuration as annotation (for conmon)
+	// Add healthcheck configuration as JSON annotation (for conmon)
 	if s.ContainerHealthCheckConfig.HealthConfig != nil {
 		healthCheckJSON, err := json.Marshal(s.ContainerHealthCheckConfig.HealthConfig)
 		if err == nil {
