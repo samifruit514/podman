@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1330,7 +1329,6 @@ func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, p
 		logDriverArg = define.NoLogging
 	case define.PassthroughLogging, define.PassthroughTTYLogging:
 		logDriverArg = define.PassthroughLogging
-	//lint:ignore ST1015 the default case has to be here
 	default: //nolint:gocritic
 		// No case here should happen except JSONLogging, but keep this here in case the options are extended
 		logrus.Errorf("%s logging specified but not supported. Choosing k8s-file logging instead", ctr.LogDriver())
