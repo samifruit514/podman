@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -46,6 +47,9 @@ const (
 	// Important: The conmon attach socket uses an extra byte at the beginning of each
 	// message to specify the STREAM so we have to increase the buffer size by one
 	bufferSize = conmonConfig.BufSize + 1
+
+	// Healthcheck message type from conmon
+	HealthCheckMsgStatusUpdate = 100
 )
 
 // ConmonOCIRuntime is an OCI runtime managed by Conmon.
@@ -1223,7 +1227,7 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 		return 0, fmt.Errorf("conmon failed: %w", err)
 	}
 
-	pid, err := readConmonPipeData(r.name, parentSyncPipe, ociLog)
+	pid, err := r.readConmonPipeDataWithHealthCheck(ctr, parentSyncPipe, ociLog)
 	if err != nil {
 		if err2 := r.DeleteContainer(ctr); err2 != nil {
 			logrus.Errorf("Removing container %s from runtime after creation failed", ctr.ID())
@@ -1453,6 +1457,114 @@ func readConmonPipeData(runtimeName string, pipe *os.File, ociLog string) (int, 
 			// If we failed to parse the JSON errors, then print the output as it is
 			if ss.si.Message != "" {
 				return ss.si.Data, getOCIRuntimeError(runtimeName, ss.si.Message)
+			}
+			return ss.si.Data, fmt.Errorf("container create failed: %w", define.ErrInternal)
+		}
+		data = ss.si.Data
+	case <-time.After(define.ContainerCreateTimeout):
+		return -1, fmt.Errorf("container creation timeout: %w", define.ErrInternal)
+	}
+	return data, nil
+}
+
+// handleHealthCheckStatusUpdate processes healthcheck status updates from conmon
+func (r *ConmonOCIRuntime) handleHealthCheckStatusUpdate(ctr *Container, message string) error {
+	// Parse the healthcheck status JSON from conmon
+	type healthCheckStatus struct {
+		Type        string `json:"type"`
+		ContainerID string `json:"container_id"`
+		Status      string `json:"status"`
+		ExitCode    int    `json:"exit_code"`
+		Timestamp   int64  `json:"timestamp"`
+	}
+
+	var hcStatus healthCheckStatus
+	if err := json.Unmarshal([]byte(message), &hcStatus); err != nil {
+		return fmt.Errorf("failed to parse healthcheck status from conmon: %w", err)
+	}
+
+	// Verify this is for the correct container
+	if hcStatus.ContainerID != ctr.ID() {
+		return fmt.Errorf("healthcheck status for wrong container: expected %s, got %s", ctr.ID(), hcStatus.ContainerID)
+	}
+
+	// Update the container's healthcheck status
+	if err := ctr.updateHealthStatus(hcStatus.Status); err != nil {
+		return fmt.Errorf("failed to update healthcheck status for container %s: %w", ctr.ID(), err)
+	}
+
+	logrus.Debugf("Updated healthcheck status for container %s to %s (exit code: %d)", ctr.ID(), hcStatus.Status, hcStatus.ExitCode)
+	return nil
+}
+
+// readConmonPipeDataWithHealthCheck reads sync pipe data and handles healthcheck status updates
+func (r *ConmonOCIRuntime) readConmonPipeDataWithHealthCheck(ctr *Container, pipe *os.File, ociLog string) (int, error) {
+	// syncInfo is used to return data from monitor process to daemon
+	type syncInfo struct {
+		Data    int    `json:"data"`
+		Message string `json:"message,omitempty"`
+	}
+
+	// Wait to get container pid from conmon
+	type syncStruct struct {
+		si  *syncInfo
+		err error
+	}
+	ch := make(chan syncStruct)
+	go func() {
+		var si *syncInfo
+		rdr := bufio.NewReader(pipe)
+		b, err := rdr.ReadBytes('\n')
+		// ignore EOF here, error is returned even when data was read
+		// if it is no valid json unmarshal will fail below
+		if err != nil && !errors.Is(err, io.EOF) {
+			ch <- syncStruct{err: err}
+		}
+		if err := json.Unmarshal(b, &si); err != nil {
+			ch <- syncStruct{err: fmt.Errorf("conmon bytes %q: %w", string(b), err)}
+			return
+		}
+		ch <- syncStruct{si: si}
+	}()
+
+	var data int
+	select {
+	case ss := <-ch:
+		if ss.err != nil {
+			if ociLog != "" {
+				ociLogData, err := os.ReadFile(ociLog)
+				if err == nil {
+					var ociErr ociError
+					if err := json.Unmarshal(ociLogData, &ociErr); err == nil {
+						return -1, getOCIRuntimeError(r.name, ociErr.Msg)
+					}
+				}
+			}
+			return -1, fmt.Errorf("container create failed (no logs from conmon): %w", ss.err)
+		}
+		logrus.Debugf("Received: %d", ss.si.Data)
+
+		// Handle healthcheck status updates
+		if ss.si.Data == HealthCheckMsgStatusUpdate && ss.si.Message != "" {
+			if err := r.handleHealthCheckStatusUpdate(ctr, ss.si.Message); err != nil {
+				logrus.Errorf("Failed to handle healthcheck status update: %v", err)
+			}
+			// Continue processing as this is not an error
+		}
+
+		if ss.si.Data < 0 {
+			if ociLog != "" {
+				ociLogData, err := os.ReadFile(ociLog)
+				if err == nil {
+					var ociErr ociError
+					if err := json.Unmarshal(ociLogData, &ociErr); err == nil {
+						return ss.si.Data, getOCIRuntimeError(r.name, ociErr.Msg)
+					}
+				}
+			}
+			// If we failed to parse the JSON errors, then print the output as it is
+			if ss.si.Message != "" {
+				return ss.si.Data, getOCIRuntimeError(r.name, ss.si.Message)
 			}
 			return ss.si.Data, fmt.Errorf("container create failed: %w", define.ErrInternal)
 		}
