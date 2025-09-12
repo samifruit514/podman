@@ -1420,15 +1420,24 @@ func readConmonPipeData(runtimeName string, pipe *os.File, ociLog string, ctr ..
 		var si *syncInfo
 		rdr := bufio.NewReader(pipe)
 		b, err := rdr.ReadBytes('\n')
+
+		// Log the raw JSON string received from conmon
+		logrus.Debugf("HEALTHCHECK: Raw JSON received from conmon: %q", string(b))
+		logrus.Debugf("HEALTHCHECK: JSON length: %d bytes", len(b))
+
 		// ignore EOF here, error is returned even when data was read
 		// if it is no valid json unmarshal will fail below
 		if err != nil && !errors.Is(err, io.EOF) {
+			logrus.Debugf("HEALTHCHECK: Error reading from conmon pipe: %v", err)
 			ch <- syncStruct{err: err}
+			return
 		}
 		if err := json.Unmarshal(b, &si); err != nil {
+			logrus.Debugf("HEALTHCHECK: Failed to unmarshal JSON from conmon: %v", err)
 			ch <- syncStruct{err: fmt.Errorf("conmon bytes %q: %w", string(b), err)}
 			return
 		}
+		logrus.Debugf("HEALTHCHECK: Successfully parsed JSON from conmon: Data=%d, Message=%q", si.Data, si.Message)
 		ch <- syncStruct{si: si}
 	}()
 
