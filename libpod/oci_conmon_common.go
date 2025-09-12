@@ -985,7 +985,8 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 	if err != nil {
 		return 0, fmt.Errorf("creating socket pair: %w", err)
 	}
-	defer errorhandling.CloseQuiet(parentSyncPipe)
+	// Note: parentSyncPipe is NOT closed here because it's used for continuous healthcheck monitoring
+	// defer errorhandling.CloseQuiet(parentSyncPipe)
 
 	childStartPipe, parentStartPipe, err := newPipe()
 	if err != nil {
@@ -1210,6 +1211,8 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 	// regardless of whether we errored or not, we no longer need the children pipes
 	childSyncPipe.Close()
 	childStartPipe.Close()
+
+	// Note: parentSyncPipe is NOT closed here because it's used for continuous healthcheck monitoring
 	if err != nil {
 		return 0, err
 	}
