@@ -1046,6 +1046,9 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 	logrus.Debugf("HEALTHCHECK: Adding healthcheck args for container %s (has healthcheck: %v)", ctr.ID(), ctr.HasHealthCheck())
 	args = r.addHealthCheckArgs(ctr, args)
 
+	// Log the final conmon command for debugging
+	logrus.Debugf("HEALTHCHECK: Final conmon command for container %s: %v", ctr.ID(), args)
+
 	if r.noPivot {
 		args = append(args, "--no-pivot")
 	}
@@ -1510,6 +1513,17 @@ func (r *ConmonOCIRuntime) handleHealthCheckStatusUpdate(ctr *Container, message
 func (r *ConmonOCIRuntime) readConmonPipeDataWithHealthCheck(ctr *Container, pipe *os.File, ociLog string) (int, error) {
 	logrus.Debugf("HEALTHCHECK: Starting readConmonPipeDataWithHealthCheck for container %s", ctr.ID())
 
+	// Log healthcheck configuration for debugging
+	if ctr.HasHealthCheck() {
+		logrus.Debugf("HEALTHCHECK: Container %s has healthcheck config", ctr.ID())
+		// Try to get the healthcheck config from the container
+		if hcConfig := ctr.HealthCheckConfig(); hcConfig != nil {
+			logrus.Debugf("HEALTHCHECK: Container %s healthcheck config: %+v", ctr.ID(), hcConfig)
+		}
+	} else {
+		logrus.Debugf("HEALTHCHECK: Container %s does not have healthcheck config", ctr.ID())
+	}
+
 	// syncInfo is used to return data from monitor process to daemon
 	type syncInfo struct {
 		Data    int    `json:"data"`
@@ -1563,6 +1577,11 @@ func (r *ConmonOCIRuntime) readConmonPipeDataWithHealthCheck(ctr *Container, pip
 		}
 		logrus.Debugf("HEALTHCHECK: Received sync data for container %s: Data=%d, Message=%q", ctr.ID(), ss.si.Data, ss.si.Message)
 
+		// Log all message types we receive to help debug
+		if ss.si.Data != 0 { // Don't log the initial container creation message
+			logrus.Debugf("HEALTHCHECK: Received message type %d for container %s (expected healthcheck type: %d)", ss.si.Data, ctr.ID(), HealthCheckMsgStatusUpdate)
+		}
+
 		// Handle healthcheck status updates
 		if ss.si.Data == HealthCheckMsgStatusUpdate && ss.si.Message != "" {
 			logrus.Infof("HEALTHCHECK: Received healthcheck status update for container %s: %s", ctr.ID(), ss.si.Message)
@@ -1574,6 +1593,9 @@ func (r *ConmonOCIRuntime) readConmonPipeDataWithHealthCheck(ctr *Container, pip
 			// Continue processing as this is not an error
 		} else if ss.si.Data == HealthCheckMsgStatusUpdate {
 			logrus.Debugf("HEALTHCHECK: Received healthcheck message type %d for container %s but no message content", ss.si.Data, ctr.ID())
+		} else if ss.si.Data > 1000 {
+			// This might be a healthcheck message with a different type number
+			logrus.Debugf("HEALTHCHECK: Received high-numbered message type %d for container %s - might be healthcheck related", ss.si.Data, ctr.ID())
 		}
 
 		if ss.si.Data < 0 {
