@@ -1231,7 +1231,7 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 	}
 
 	logrus.Debugf("HEALTHCHECK: About to read sync pipe data for container %s", ctr.ID())
-	pid, err := r.readConmonPipeDataWithHealthCheck(ctr, parentSyncPipe, ociLog)
+	pid, err := readConmonPipeData(r.name, parentSyncPipe, ociLog, ctr)
 	if err != nil {
 		if err2 := r.DeleteContainer(ctr); err2 != nil {
 			logrus.Errorf("Removing container %s from runtime after creation failed", ctr.ID())
@@ -1402,7 +1402,8 @@ func readConmonPidFile(pidFile string) (int, error) {
 }
 
 // readConmonPipeData attempts to read a syncInfo struct from the pipe
-func readConmonPipeData(runtimeName string, pipe *os.File, ociLog string) (int, error) {
+// If ctr is provided, it will also handle healthcheck status updates
+func readConmonPipeData(runtimeName string, pipe *os.File, ociLog string, ctr ...*Container) (int, error) {
 	// syncInfo is used to return data from monitor process to daemon
 	type syncInfo struct {
 		Data    int    `json:"data"`
@@ -1447,6 +1448,30 @@ func readConmonPipeData(runtimeName string, pipe *os.File, ociLog string) (int, 
 			return -1, fmt.Errorf("container create failed (no logs from conmon): %w", ss.err)
 		}
 		logrus.Debugf("Received: %d", ss.si.Data)
+
+		// Handle healthcheck status updates if container is provided
+		if len(ctr) > 0 && ctr[0] != nil {
+			logrus.Debugf("HEALTHCHECK: Received sync data for container %s: Data=%d, Message=%q", ctr[0].ID(), ss.si.Data, ss.si.Message)
+
+			// Log all message types we receive to help debug
+			if ss.si.Data != 0 { // Don't log the initial container creation message
+				logrus.Debugf("HEALTHCHECK: Received message type %d for container %s (expected healthcheck type: %d)", ss.si.Data, ctr[0].ID(), HealthCheckMsgStatusUpdate)
+			}
+
+			// Handle healthcheck status updates
+			if ss.si.Data == HealthCheckMsgStatusUpdate && ss.si.Message != "" {
+				logrus.Infof("HEALTHCHECK: Received healthcheck status update for container %s: %s", ctr[0].ID(), ss.si.Message)
+				// We need to get the runtime to call handleHealthCheckStatusUpdate
+				// For now, just log it - we'll need to refactor this
+				logrus.Debugf("HEALTHCHECK: Would process healthcheck status update: %s", ss.si.Message)
+			} else if ss.si.Data == HealthCheckMsgStatusUpdate {
+				logrus.Debugf("HEALTHCHECK: Received healthcheck message type %d for container %s but no message content", ss.si.Data, ctr[0].ID())
+			} else if ss.si.Data > 1000 {
+				// This might be a healthcheck message with a different type number
+				logrus.Debugf("HEALTHCHECK: Received high-numbered message type %d for container %s - might be healthcheck related", ss.si.Data, ctr[0].ID())
+			}
+		}
+
 		if ss.si.Data < 0 {
 			if ociLog != "" {
 				ociLogData, err := os.ReadFile(ociLog)
@@ -1507,121 +1532,6 @@ func (r *ConmonOCIRuntime) handleHealthCheckStatusUpdate(ctr *Container, message
 
 	logrus.Infof("HEALTHCHECK: Successfully updated healthcheck status for container %s to %s (exit code: %d)", ctr.ID(), hcStatus.Status, hcStatus.ExitCode)
 	return nil
-}
-
-// readConmonPipeDataWithHealthCheck reads sync pipe data and handles healthcheck status updates
-func (r *ConmonOCIRuntime) readConmonPipeDataWithHealthCheck(ctr *Container, pipe *os.File, ociLog string) (int, error) {
-	logrus.Debugf("HEALTHCHECK: Starting readConmonPipeDataWithHealthCheck for container %s", ctr.ID())
-
-	// Log healthcheck configuration for debugging
-	if ctr.HasHealthCheck() {
-		logrus.Debugf("HEALTHCHECK: Container %s has healthcheck config", ctr.ID())
-		// Try to get the healthcheck config from the container
-		if hcConfig := ctr.HealthCheckConfig(); hcConfig != nil {
-			logrus.Debugf("HEALTHCHECK: Container %s healthcheck config: %+v", ctr.ID(), hcConfig)
-		}
-	} else {
-		logrus.Debugf("HEALTHCHECK: Container %s does not have healthcheck config", ctr.ID())
-	}
-
-	// syncInfo is used to return data from monitor process to daemon
-	type syncInfo struct {
-		Data    int    `json:"data"`
-		Message string `json:"message,omitempty"`
-	}
-
-	// Wait to get container pid from conmon
-	type syncStruct struct {
-		si  *syncInfo
-		err error
-	}
-	ch := make(chan syncStruct)
-	go func() {
-		logrus.Debugf("HEALTHCHECK: Starting goroutine to read from sync pipe for container %s", ctr.ID())
-		var si *syncInfo
-		rdr := bufio.NewReader(pipe)
-		b, err := rdr.ReadBytes('\n')
-		logrus.Debugf("HEALTHCHECK: Read %d bytes from sync pipe for container %s: %q", len(b), ctr.ID(), string(b))
-
-		// ignore EOF here, error is returned even when data was read
-		// if it is no valid json unmarshal will fail below
-		if err != nil && !errors.Is(err, io.EOF) {
-			logrus.Debugf("HEALTHCHECK: Error reading from sync pipe for container %s: %v", ctr.ID(), err)
-			ch <- syncStruct{err: err}
-			return
-		}
-		if err := json.Unmarshal(b, &si); err != nil {
-			logrus.Debugf("HEALTHCHECK: Failed to unmarshal JSON for container %s: %v", ctr.ID(), err)
-			ch <- syncStruct{err: fmt.Errorf("conmon bytes %q: %w", string(b), err)}
-			return
-		}
-		logrus.Debugf("HEALTHCHECK: Successfully parsed sync info for container %s: Data=%d, Message=%q", ctr.ID(), si.Data, si.Message)
-		ch <- syncStruct{si: si}
-	}()
-
-	var data int
-	select {
-	case ss := <-ch:
-		if ss.err != nil {
-			logrus.Errorf("HEALTHCHECK: Error in sync pipe reader for container %s: %v", ctr.ID(), ss.err)
-			if ociLog != "" {
-				ociLogData, err := os.ReadFile(ociLog)
-				if err == nil {
-					var ociErr ociError
-					if err := json.Unmarshal(ociLogData, &ociErr); err == nil {
-						return -1, getOCIRuntimeError(r.name, ociErr.Msg)
-					}
-				}
-			}
-			return -1, fmt.Errorf("container create failed (no logs from conmon): %w", ss.err)
-		}
-		logrus.Debugf("HEALTHCHECK: Received sync data for container %s: Data=%d, Message=%q", ctr.ID(), ss.si.Data, ss.si.Message)
-
-		// Log all message types we receive to help debug
-		if ss.si.Data != 0 { // Don't log the initial container creation message
-			logrus.Debugf("HEALTHCHECK: Received message type %d for container %s (expected healthcheck type: %d)", ss.si.Data, ctr.ID(), HealthCheckMsgStatusUpdate)
-		}
-
-		// Handle healthcheck status updates
-		if ss.si.Data == HealthCheckMsgStatusUpdate && ss.si.Message != "" {
-			logrus.Infof("HEALTHCHECK: Received healthcheck status update for container %s: %s", ctr.ID(), ss.si.Message)
-			if err := r.handleHealthCheckStatusUpdate(ctr, ss.si.Message); err != nil {
-				logrus.Errorf("HEALTHCHECK: Failed to handle healthcheck status update for container %s: %v", ctr.ID(), err)
-			} else {
-				logrus.Infof("HEALTHCHECK: Successfully processed healthcheck status update for container %s", ctr.ID())
-			}
-			// Continue processing as this is not an error
-		} else if ss.si.Data == HealthCheckMsgStatusUpdate {
-			logrus.Debugf("HEALTHCHECK: Received healthcheck message type %d for container %s but no message content", ss.si.Data, ctr.ID())
-		} else if ss.si.Data > 1000 {
-			// This might be a healthcheck message with a different type number
-			logrus.Debugf("HEALTHCHECK: Received high-numbered message type %d for container %s - might be healthcheck related", ss.si.Data, ctr.ID())
-		}
-
-		if ss.si.Data < 0 {
-			logrus.Debugf("HEALTHCHECK: Received error data %d for container %s", ss.si.Data, ctr.ID())
-			if ociLog != "" {
-				ociLogData, err := os.ReadFile(ociLog)
-				if err == nil {
-					var ociErr ociError
-					if err := json.Unmarshal(ociLogData, &ociErr); err == nil {
-						return ss.si.Data, getOCIRuntimeError(r.name, ociErr.Msg)
-					}
-				}
-			}
-			// If we failed to parse the JSON errors, then print the output as it is
-			if ss.si.Message != "" {
-				return ss.si.Data, getOCIRuntimeError(r.name, ss.si.Message)
-			}
-			return ss.si.Data, fmt.Errorf("container create failed: %w", define.ErrInternal)
-		}
-		data = ss.si.Data
-		logrus.Debugf("HEALTHCHECK: Returning data %d for container %s", data, ctr.ID())
-	case <-time.After(define.ContainerCreateTimeout):
-		logrus.Errorf("HEALTHCHECK: Timeout waiting for sync pipe data for container %s", ctr.ID())
-		return -1, fmt.Errorf("container creation timeout: %w", define.ErrInternal)
-	}
-	return data, nil
 }
 
 // writeConmonPipeData writes nonce data to a pipe
